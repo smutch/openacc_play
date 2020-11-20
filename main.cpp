@@ -2,9 +2,14 @@
 #include <cstdio>
 #include <vector>
 #include <chrono>
+// #include <algorithm>
 
 void sumit(const std::vector<float>& __restrict x, std::vector<float>& __restrict y) {
+
+    // std::transform(std::execution::par, x.begin(), x.end(), y.begin(), [](float x, float y) { return x+y; });
+
     const int N = x.size();
+#pragma omp parallel for
 #pragma acc parallel loop
     for (int ii=0; ii < N; ++ii)
         y[ii] += x[ii];
@@ -13,7 +18,7 @@ void sumit(const std::vector<float>& __restrict x, std::vector<float>& __restric
 int main(int argc, char *argv[])
 {
 
-    const int N = 5000000;
+    const int N = 5000;
     const int loops = 1000;
 
     std::vector<float> x(N, 1.0f);
@@ -22,8 +27,11 @@ int main(int argc, char *argv[])
     {
         auto time_start = std::chrono::high_resolution_clock::now();
 
-        for(int ii=0; ii < loops; ++ii)
+// #pragma acc copyin(x) copy(y)
+        {
+          for(int ii=0; ii < loops; ++ii)
             sumit(x, y);
+        }
 
         auto time_stop = std::chrono::high_resolution_clock::now();
         auto duration = std::chrono::duration_cast<std::chrono::microseconds>(time_stop - time_start) / 100;
