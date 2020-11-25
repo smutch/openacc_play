@@ -21,7 +21,6 @@ static void print_matrix(std::vector<double> M, std::pair<int,int> shape) {
 int main(int argc, char *argv[])
 {
 
-  // wikipedia example
   int m = 3;
   int n = 2;
   int ldM = m;
@@ -81,6 +80,36 @@ int main(int argc, char *argv[])
   print_matrix(VT, std::make_pair(ldVT, n));
 
   cusolverDnDestroy(cusolverH);
-  
+
+  fmt::print("\n-----------------------------------\n\n");
+
+  std::vector<double>x_truth = {1.0, 0.5, 4.3};
+  std::vector<double>b = {11.6, 8.8};
+  std::vector<double>x(x_truth.size());
+
+  cusolver_status = cusolverDnCreate(&cusolverH);
+  assert(CUSOLVER_STATUS_SUCCESS == cusolver_status);
+  cusolverDnSetStream(cusolverH, (cudaStream_t)acc_get_cuda_stream(acc_async_sync));
+
+  size_t lwork_bytes = 0;
+  cusolverDnDSgels_bufferSize(cusolverH, m, n, 1, NULL, ldM, NULL, std::max(m, n), NULL, std::max(m, n), NULL, &lwork_bytes);
+
+  double* x_ = x.data();
+  double* b_ = b.data();
+
+#pragma acc data copyin(M_, b_) copyout(x_[0:m])
+  {
+    void* workspace_ = acc_malloc(lwork_bytes * sizeof(char));
+
+    #pragma acc host_data use_device(M_, b_, x_)
+    {
+      cusolver_status = cusolverDnDSgels(...);
+      cudaError_t cudaStat1 = cudaDeviceSynchronize();
+      assert(cusolver_status == CUSOLVER_STATUS_SUCCESS);
+    }
+
+    acc_free(workspace_);
+  }
+
   return 0;
 }
