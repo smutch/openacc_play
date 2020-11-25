@@ -1,6 +1,5 @@
 #include <fmt/core.h>
 #include <vector>
-#include <cublas_v2.h>
 #include <cusolverDn.h>
 #include <assert.h>
 #include <cuda_runtime.h>
@@ -23,43 +22,65 @@ int main(int argc, char *argv[])
 {
 
   // wikipedia example
-  auto m = 4;
-  auto n = 5;
-  std::vector<double>M = {1,0,0,0,2,0,0,3,0,0,0,0,0,0,0,0,2,0,0,0};
+  int m = 3;
+  int n = 2;
+  int ldM = m;
+  std::vector<double>M = {1.0, 4.0, 2.0, 2.0, 5.0, 1.0};
   print_matrix(M, std::make_pair(m, n));
 
   cusolverDnHandle_t cusolverH = NULL;
   cusolverStatus_t cusolver_status = cusolverDnCreate(&cusolverH);
   assert(CUSOLVER_STATUS_SUCCESS == cusolver_status);
 
-  cublasHandle_t cublasH = NULL;
-  cublasStatus_t cublas_status = cublasCreate(&cublasH);
-  assert(CUBLAS_STATUS_SUCCESS == cublas_status); 
+  // Ensure we use the same stream as OpenACC (not sure if this is necessary
+  // here, but it is for Thrust calls).
+  cusolverDnSetStream(cusolverH, (cudaStream_t)acc_get_cuda_stream(acc_async_sync));
 
   int lwork;
   cusolver_status = cusolverDnDgesvd_bufferSize(cusolverH, m, n, &lwork);
   assert(cusolver_status == CUSOLVER_STATUS_SUCCESS);
 
-  std::vector<double> S(n, 0);
-  std::vector<double> U(m*m, 0);
-  std::vector<double> VT(n*n, 0);
-  std::vector<int> devInfo(1, 0);
+  int ldS = std::min(m, n);
+  std::vector<double> S(ldS, 0);
+  int ldU = std::max(1, m);
+  std::vector<double> U(ldU*m, 0);
+  int ldVT = std::max(1, n);
+  std::vector<double> VT(ldVT*n, 0);
+  int* devInfo;
     
-#pragma acc data copyin(M) copyout(S[n], U[m*m], VT[n*n], devInfo[1])
+  double *M_ = M.data();
+  double *S_ = S.data();
+  double *U_ = U.data();
+  double *VT_ = VT.data();
+
+#pragma acc data copyin(M_) copyout(S_[0:m], U_[0:m*m], VT_[0:n*n], devInfo[0:1])
   {
-    double* work = (double *)acc_malloc(lwork * sizeof(double));
+    double* work_ = (double *)acc_malloc(lwork * sizeof(double));
+    double* rwork_ = (double *)acc_malloc((m-1) * sizeof(double));
 
     signed char jobu = 'A'; // all m columns of U
     signed char jobvt = 'A'; // all n columns of VT
-    cusolver_status = cusolverDnDgesvd(cusolverH, jobu, jobvt, m, n, M.data(), m, S.data(), U.data(), m, VT.data(), n, work, lwork, NULL, devInfo.data());
-    cudaError_t cudaStat1 = cudaDeviceSynchronize();
 
-    acc_free(work);
+    #pragma acc host_data use_device(M_, S_, U_, VT_, devInfo)
+    {
+      /*********************************
+      *  This only works if m>=n !!!  *
+      *********************************/
+      cusolver_status = cusolverDnDgesvd(cusolverH, jobu, jobvt, m, n, M_, m, S_, U_, m, VT_, n, work_, lwork, rwork_, devInfo);
+      cudaError_t cudaStat1 = cudaDeviceSynchronize();
+      assert(cusolver_status == CUSOLVER_STATUS_SUCCESS);
+      // fmt::print("err = {}\n", devInfo_[0]);
+    }
+
+    acc_free(rwork_);
+    acc_free(work_);
   }
 
-  cublasDestroy(cublasH);
+  print_matrix(U, std::make_pair(ldU, m));
+  print_matrix(S, std::make_pair(ldS, 1));
+  print_matrix(VT, std::make_pair(ldVT, n));
+
   cusolverDnDestroy(cusolverH);
   
-  print_matrix(U, std::make_pair(m, m));
   return 0;
 }

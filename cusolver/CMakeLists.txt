@@ -27,4 +27,4 @@ target_link_libraries(cusolver_tests PRIVATE fmt::fmt)
 # target_link_libraries(cusolver_tests PRIVATE CUDA::cusolver)
 
 target_link_directories(cusolver_tests PRIVATE /usr/local/cuda/lib64)
-target_link_libraries(cusolver_tests PRIVATE cusolver cublas cudart)
+target_link_libraries(cusolver_tests PRIVATE cusolver cudart)

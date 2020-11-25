@@ -1,6 +1,7 @@
 .PHONY: build
 build:
 	cmake --build build -- ${MAKE_ARGS}
+	./build/cusolver_tests
 
 .PHONY: reconfig
 reconfig:
