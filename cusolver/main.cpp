@@ -5,12 +5,13 @@
 #include <cuda_runtime.h>
 #include <openacc.h>
 
+// NB: Column-major ordering!!!
 static void print_matrix(std::vector<double> M, std::pair<int,int> shape) {
 
   for(int ii=0; ii < shape.first; ++ii) {
     fmt::print("|");
     for(int jj=0; jj < shape.second; ++jj) {
-      fmt::print(" {}", M[ii*shape.second + jj]);
+      fmt::print(" {}", M[jj*shape.first + ii]);
     }
     fmt::print(" |\n");
   }
@@ -45,7 +46,7 @@ int main(int argc, char *argv[])
   std::vector<double> U(ldU*m, 0);
   int ldVT = std::max(1, n);
   std::vector<double> VT(ldVT*n, 0);
-  int* devInfo;
+  int devInfo;
     
   double *M_ = M.data();
   double *S_ = S.data();
@@ -65,7 +66,7 @@ int main(int argc, char *argv[])
       /*********************************
       *  This only works if m>=n !!!  *
       *********************************/
-      cusolver_status = cusolverDnDgesvd(cusolverH, jobu, jobvt, m, n, M_, m, S_, U_, m, VT_, n, work_, lwork, rwork_, devInfo);
+      cusolver_status = cusolverDnDgesvd(cusolverH, jobu, jobvt, m, n, M_, m, S_, U_, m, VT_, n, work_, lwork, rwork_, &devInfo);
       cudaError_t cudaStat1 = cudaDeviceSynchronize();
       assert(cusolver_status == CUSOLVER_STATUS_SUCCESS);
       // fmt::print("err = {}\n", devInfo_[0]);
@@ -83,33 +84,87 @@ int main(int argc, char *argv[])
 
   fmt::print("\n-----------------------------------\n\n");
 
-  std::vector<double>x_truth = {1.0, 0.5, 4.3};
-  std::vector<double>b = {11.6, 8.8};
+  M = {1.0, 4.0, 2.0, 2.0, 5.0, 1.0};
+  int ldx = std::max(n, m);
+  std::vector<double>x_truth = {1.0, 0.5};
+  int ldb = std::max(n, m);
+  std::vector<double>b = {2.0, 6.5, 2.5};
   std::vector<double>x(x_truth.size());
 
   cusolver_status = cusolverDnCreate(&cusolverH);
   assert(CUSOLVER_STATUS_SUCCESS == cusolver_status);
-  cusolverDnSetStream(cusolverH, (cudaStream_t)acc_get_cuda_stream(acc_async_sync));
 
+  // =======================================================
+  // create the params and info structure for the expert interface
+  cusolverDnIRSParams_t gels_irs_params;
+  cusolverDnIRSParamsCreate( &gels_irs_params );
+  cusolverDnIRSInfos_t gels_irs_infos;
+  cusolverDnIRSInfosCreate( &gels_irs_infos );
+
+  // Set the main and the low precision of the solver DSgels 
+  // D is for double S for single precision thus 
+  // main_precision is CUSOLVER_R_FP64, low_precision is CUSOLVER_R_FP32
+  cusolverDnIRSParamsSetSolverPrecisions( gels_irs_params, CUSOLVER_R_64F, CUSOLVER_R_32F );
+  // Set the refinement solver.
+  cusolverDnIRSParamsSetRefinementSolver( gels_irs_params, CUSOLVER_IRS_REFINE_CLASSICAL );
+  // Get work buffer size
   size_t lwork_bytes = 0;
-  cusolverDnDSgels_bufferSize(cusolverH, m, n, 1, NULL, ldM, NULL, std::max(m, n), NULL, std::max(m, n), NULL, &lwork_bytes);
+  cusolver_status = cusolverDnIRSXgels_bufferSize(cusolverH, gels_irs_params, m, n, 1, &lwork_bytes);
+  assert(CUSOLVER_STATUS_SUCCESS == cusolver_status);
 
   double* x_ = x.data();
   double* b_ = b.data();
+  devInfo = 0;
 
-#pragma acc data copyin(M_, b_) copyout(x_[0:m])
+#pragma acc data copyin(M_[m*n], b_[m]) copyout(x_[n]) copy(devInfo)
   {
     void* workspace_ = acc_malloc(lwork_bytes * sizeof(char));
+    int niters = 0;
 
-    #pragma acc host_data use_device(M_, b_, x_)
+    #pragma acc host_data use_device(M_, b_, x_, devInfo)
     {
-      cusolver_status = cusolverDnDSgels(...);
+      // cusolver_status = cusolverDnDSgels(cusolverH, m, n, 1, M_, ldM, b_, ldb, x_, ldx, workspace_, lwork_bytes, &niters, &devInfo);
+      cusolver_status = cusolverDnIRSXgels(cusolverH, gels_irs_params, gels_irs_infos, m, n, 1, (void *)M_, ldM, (void *)b_, ldb, (void *)x_, ldx, workspace_, lwork_bytes, &niters, &devInfo);
       cudaError_t cudaStat1 = cudaDeviceSynchronize();
-      assert(cusolver_status == CUSOLVER_STATUS_SUCCESS);
+      assert(CUSOLVER_STATUS_SUCCESS == cusolver_status);
     }
 
     acc_free(workspace_);
   }
+
+//   cusolver_status = cusolverDnCreate(&cusolverH);
+//   assert(CUSOLVER_STATUS_SUCCESS == cusolver_status);
+//   cusolverDnSetStream(cusolverH, (cudaStream_t)acc_get_cuda_stream(acc_async_sync));
+
+//   size_t lwork_bytes = 0;
+//   cusolver_status = cusolverDnDSgels_bufferSize(cusolverH, m, n, 1, NULL, ldM, NULL, ldb, NULL, ldx, NULL, &lwork_bytes);
+//   assert(cusolver_status == CUSOLVER_STATUS_SUCCESS);
+//   fmt::print("lwork_bytes = {}\n", lwork_bytes);
+
+//   double* x_ = x.data();
+//   double* b_ = b.data();
+//   devInfo = 0;
+
+// #pragma acc data copyin(M_[m*n], b_[3]) copyout(x_[ldx]) copy(devInfo)
+//   {
+//     void* workspace_ = acc_malloc(lwork_bytes * sizeof(char));
+//     int niters = 0;
+
+//     #pragma acc host_data use_device(M_, b_, x_, devInfo)
+//     {
+//       cusolver_status = cusolverDnDSgels(cusolverH, m, n, 1, M_, ldM, b_, ldb, x_, ldx, workspace_, lwork_bytes, &niters, &devInfo);
+//       cudaError_t cudaStat1 = cudaDeviceSynchronize();
+//     }
+
+//     acc_free(workspace_);
+//   }
+  fmt::print("devInfo = {}\n", devInfo);
+
+  print_matrix(M, std::make_pair(m, n));
+  print_matrix(x, std::make_pair(1, n));
+  print_matrix(b, std::make_pair(m, 1));
+
+  cusolverDnDestroy(cusolverH);
 
   return 0;
 }
